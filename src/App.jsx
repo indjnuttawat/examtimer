@@ -1,31 +1,36 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Settings, Plus, Trash2, Clock, BookOpen, AlertCircle, X } from 'lucide-react';
-
-// ข้อมูลจำลองเริ่มต้น (ตั้งค่าให้สอดคล้องกับช่วงบ่าย เพื่อให้เห็นการทำงาน)
-const initialExams = [
-  { id: '1', code: 'CS101', name: 'Introduction to Computer Science', start: '09:00', end: '11:30' },
-  { id: '2', code: 'MA202', name: 'Calculus II', start: '12:00', end: '14:30' },
-  { id: '3', code: 'EN105', name: 'English for Communication', start: '15:00', end: '17:00' },
-];
+// นำเข้าเครื่องมือจาก Firebase ที่เราเพิ่งสร้าง
+import { collection, addDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
+import { db } from './firebase'; 
 
 export default function App() {
-  const [exams, setExams] = useState(initialExams);
+  const [exams, setExams] = useState([]); // เริ่มต้นด้วยตารางว่างๆ เพื่อรอโหลดจาก Firebase
   const [now, setNow] = useState(new Date());
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [leftPanelColor, setLeftPanelColor] = useState('#0f172a');
-
-  // ฟอร์มสำหรับเพิ่มวิชาใหม่
   const [newExam, setNewExam] = useState({ code: '', name: '', start: '', end: '' });
 
   // อัปเดตเวลาปัจจุบันทุกๆ 1 วินาที
   useEffect(() => {
-    const timer = setInterval(() => {
-      setNow(new Date());
-    }, 1000);
+    const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // ฟังก์ชันแปลงเวลาแบบ HH:mm เป็น Object Date ของวันนี้
+  // 🔴 ส่วนที่เพิ่มใหม่: ดึงข้อมูลจาก Firebase แบบ Real-time
+  useEffect(() => {
+    // onSnapshot คือการดักฟัง ถ้ากระดานดำ (Firebase) มีการเปลี่ยนแปลง ให้โหลดใหม่ทันที
+    const unsubscribe = onSnapshot(collection(db, 'exams'), (snapshot) => {
+      const examsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setExams(examsData);
+    });
+    // ปิดการดักฟังเมื่อปิดหน้าเว็บ
+    return () => unsubscribe();
+  }, []);
+
   const parseTime = (timeStr) => {
     if (!timeStr) return new Date();
     const [hours, minutes] = timeStr.split(':');
@@ -34,53 +39,41 @@ export default function App() {
     return d;
   };
 
-  // จัดเรียงวิชาตามเวลาเริ่มสอบ
   const sortedExams = useMemo(() => {
     return [...exams].sort((a, b) => parseTime(a.start) - parseTime(b.start));
   }, [exams, now]);
 
-  // หาวิชาที่กำลังสอบ หรือวิชาถัดไป
   const { currentExam, nextExam, status } = useMemo(() => {
     let current = null;
     let next = null;
-
     for (let exam of sortedExams) {
       const startTime = parseTime(exam.start);
       const endTime = parseTime(exam.end);
-
       if (now >= startTime && now <= endTime) {
-        current = exam;
-        break;
+        current = exam; break;
       }
     }
-
     if (!current) {
       next = sortedExams.find(exam => now < parseTime(exam.start));
     }
-
     return { 
-      currentExam: current, 
-      nextExam: next, 
-      status: current ? 'ACTIVE' : (next ? 'WAITING' : 'FINISHED') 
+      currentExam: current, nextExam: next, status: current ? 'ACTIVE' : (next ? 'WAITING' : 'FINISHED') 
     };
   }, [sortedExams, now]);
 
-  // คำนวณเวลาที่เหลือ (แสดงผลในฝั่งซ้าย)
   const timeDisplay = useMemo(() => {
     if (status === 'ACTIVE' && currentExam) {
-      const endTime = parseTime(currentExam.end);
-      const diff = endTime - now;
+      const diff = parseTime(currentExam.end) - now;
       const h = Math.floor(diff / (1000 * 60 * 60));
       const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
       const s = Math.floor((diff % (1000 * 60)) / 1000);
       return {
         title: 'Time Remaining',
         time: `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`,
-        isUrgent: diff < 15 * 60 * 1000 // ถ้าน้อยกว่า 15 นาที ให้เป็นตัวแดง
+        isUrgent: diff < 15 * 60 * 1000
       };
     } else if (status === 'WAITING' && nextExam) {
-      const startTime = parseTime(nextExam.start);
-      const diff = startTime - now;
+      const diff = parseTime(nextExam.start) - now;
       const h = Math.floor(diff / (1000 * 60 * 60));
       const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
       const s = Math.floor((diff % (1000 * 60)) / 1000);
@@ -93,18 +86,18 @@ export default function App() {
     return { title: 'Status', time: '--:--:--', isUrgent: false };
   }, [status, currentExam, nextExam, now]);
 
-  // ฟังก์ชันจัดการเพิ่มวิชา
-  const handleAddExam = (e) => {
+  // 🔴 ส่วนที่เปลี่ยนใหม่: บันทึกวิชาลง Firebase แทนการจำไว้ในเครื่อง
+  const handleAddExam = async (e) => {
     e.preventDefault();
     if (newExam.code && newExam.name && newExam.start && newExam.end) {
-      setExams([...exams, { ...newExam, id: Date.now().toString() }]);
+      await addDoc(collection(db, 'exams'), newExam);
       setNewExam({ code: '', name: '', start: '', end: '' });
     }
   };
 
-  // ฟังก์ชันจัดการลบวิชา
-  const handleDeleteExam = (id) => {
-    setExams(exams.filter(exam => exam.id !== id));
+  // 🔴 ส่วนที่เปลี่ยนใหม่: สั่งลบวิชาจาก Firebase โดยตรง
+  const handleDeleteExam = async (id) => {
+    await deleteDoc(doc(db, 'exams', id));
   };
 
   const formatCurrentTime = (date) => {
@@ -116,7 +109,7 @@ export default function App() {
   return (
     <div className="flex flex-col md:flex-row h-screen bg-slate-50 font-sans overflow-hidden">
       
-      {/* ปุ่มตั้งค่ามุมขวาบน */}
+      {/* Settings Button */}
       <button 
         onClick={() => setIsSettingsOpen(true)}
         className="absolute top-6 right-6 z-20 p-3 bg-white/20 hover:bg-slate-200/50 backdrop-blur-md rounded-full shadow-lg transition-all text-slate-800 md:text-white md:bg-white/10"
@@ -124,12 +117,11 @@ export default function App() {
         <Settings size={28} />
       </button>
 
-      {/* --- ฝั่งซ้าย: แสดงเวลาและวิชาปัจจุบัน --- */}
+      {/* Left Panel */}
       <div 
         className="w-full md:w-7/12 text-white flex flex-col justify-center relative p-8 md:p-16 transition-colors duration-300"
         style={{ backgroundColor: leftPanelColor }}
       >
-        
         <div className="absolute top-8 left-8 flex items-center text-slate-300 space-x-2 text-xl md:text-2xl font-light">
           <Clock size={24} />
           <span>Current Time: {formatCurrentTime(now)}</span>
@@ -169,7 +161,7 @@ export default function App() {
         )}
       </div>
 
-      {/* --- ฝั่งขวา: รายการวิชาสอบวันนี้ --- */}
+      {/* Right Panel */}
       <div className="w-full md:w-5/12 bg-white flex flex-col h-full overflow-y-auto">
         <div className="p-8 md:p-12 pb-6 sticky top-0 bg-white/90 backdrop-blur-sm z-10 border-b border-slate-100">
           <h2 className="text-3xl font-bold text-slate-800">Today's Schedule</h2>
@@ -186,7 +178,7 @@ export default function App() {
             sortedExams.map((exam) => {
               const examStart = parseTime(exam.start);
               const examEnd = parseTime(exam.end);
-              let cardStatus = 'WAITING'; // WAITING, ACTIVE, FINISHED
+              let cardStatus = 'WAITING'; 
               
               if (now > examEnd) cardStatus = 'FINISHED';
               else if (now >= examStart && now <= examEnd) cardStatus = 'ACTIVE';
@@ -237,46 +229,30 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- เมนูตั้งค่า (Modal) --- */}
+      {/* Settings Modal */}
       {isSettingsOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl animate-in fade-in zoom-in-95 duration-200">
             
             <div className="flex justify-between items-center p-6 border-b border-slate-100">
               <h2 className="text-2xl font-bold text-slate-800">Manage Schedule & Settings</h2>
-              <button 
-                onClick={() => setIsSettingsOpen(false)}
-                className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500"
-              >
+              <button onClick={() => setIsSettingsOpen(false)} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-500">
                 <X size={24} />
               </button>
             </div>
 
             <div className="p-6 overflow-y-auto">
-              
               {/* Appearance Setting */}
               <div className="bg-slate-50 p-6 rounded-2xl mb-6 border border-slate-100">
-                <h3 className="font-semibold text-slate-700 mb-4 flex items-center">
-                  Appearance
-                </h3>
+                <h3 className="font-semibold text-slate-700 mb-4 flex items-center">Appearance</h3>
                 <div className="flex items-center space-x-4">
                   <label className="text-sm font-medium text-slate-600">Left Panel Background Color:</label>
-                  <input 
-                    type="color" 
-                    value={leftPanelColor}
-                    onChange={(e) => setLeftPanelColor(e.target.value)}
-                    className="h-10 w-16 p-0.5 bg-white border border-slate-200 rounded cursor-pointer"
-                  />
-                  <button 
-                    onClick={() => setLeftPanelColor('#0f172a')}
-                    className="text-sm text-indigo-600 hover:text-indigo-800 underline transition-colors"
-                  >
-                    Reset to Default
-                  </button>
+                  <input type="color" value={leftPanelColor} onChange={(e) => setLeftPanelColor(e.target.value)} className="h-10 w-16 p-0.5 bg-white border border-slate-200 rounded cursor-pointer" />
+                  <button onClick={() => setLeftPanelColor('#0f172a')} className="text-sm text-indigo-600 hover:text-indigo-800 underline transition-colors">Reset to Default</button>
                 </div>
               </div>
 
-              {/* ฟอร์มเพิ่มวิชา */}
+              {/* Add Exam Form */}
               <div className="bg-slate-50 p-6 rounded-2xl mb-8 border border-slate-100">
                 <h3 className="font-semibold text-slate-700 mb-4 flex items-center">
                   <Plus size={18} className="mr-2" /> Add New Subject
@@ -284,45 +260,27 @@ export default function App() {
                 <form onSubmit={handleAddExam} className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-600 mb-1">Subject Code</label>
-                    <input 
-                      type="text" required placeholder="e.g. CS101"
-                      className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      value={newExam.code} onChange={e => setNewExam({...newExam, code: e.target.value})}
-                    />
+                    <input type="text" required placeholder="e.g. CS101" className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" value={newExam.code} onChange={e => setNewExam({...newExam, code: e.target.value})} />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-600 mb-1">Subject Name</label>
-                    <input 
-                      type="text" required placeholder="e.g. Intro to Programming"
-                      className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      value={newExam.name} onChange={e => setNewExam({...newExam, name: e.target.value})}
-                    />
+                    <input type="text" required placeholder="e.g. Intro to Programming" className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" value={newExam.name} onChange={e => setNewExam({...newExam, name: e.target.value})} />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-600 mb-1">Start Time (HH:mm)</label>
-                    <input 
-                      type="time" required
-                      className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      value={newExam.start} onChange={e => setNewExam({...newExam, start: e.target.value})}
-                    />
+                    <input type="time" required className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" value={newExam.start} onChange={e => setNewExam({...newExam, start: e.target.value})} />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-slate-600 mb-1">End Time (HH:mm)</label>
-                    <input 
-                      type="time" required
-                      className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      value={newExam.end} onChange={e => setNewExam({...newExam, end: e.target.value})}
-                    />
+                    <input type="time" required className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none" value={newExam.end} onChange={e => setNewExam({...newExam, end: e.target.value})} />
                   </div>
                   <div className="md:col-span-2 mt-2">
-                    <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg transition-colors shadow-sm">
-                      Add to Schedule
-                    </button>
+                    <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg transition-colors shadow-sm">Add to Schedule</button>
                   </div>
                 </form>
               </div>
 
-              {/* รายการวิชาที่มีอยู่สำหรับลบ */}
+              {/* Exam List */}
               <div>
                 <h3 className="font-semibold text-slate-700 mb-4">All Subjects ({exams.length})</h3>
                 <div className="space-y-3">
@@ -332,29 +290,18 @@ export default function App() {
                         <div className="font-bold text-slate-800">{exam.code}</div>
                         <div className="text-sm text-slate-500">{exam.start} - {exam.end}</div>
                       </div>
-                      <button 
-                        onClick={() => handleDeleteExam(exam.id)}
-                        className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                        title="Remove Subject"
-                      >
+                      <button onClick={() => handleDeleteExam(exam.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Remove Subject">
                         <Trash2 size={20} />
                       </button>
                     </div>
                   ))}
-                  {exams.length === 0 && (
-                    <div className="text-center text-slate-400 py-4 text-sm">No exam data</div>
-                  )}
+                  {exams.length === 0 && <div className="text-center text-slate-400 py-4 text-sm">No exam data</div>}
                 </div>
               </div>
             </div>
             
             <div className="p-4 border-t border-slate-100 bg-slate-50 text-right">
-              <button 
-                onClick={() => setIsSettingsOpen(false)}
-                className="px-6 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-medium transition-colors"
-              >
-                Close
-              </button>
+              <button onClick={() => setIsSettingsOpen(false)} className="px-6 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-medium transition-colors">Close</button>
             </div>
           </div>
         </div>
